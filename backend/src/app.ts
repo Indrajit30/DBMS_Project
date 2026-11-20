@@ -4,6 +4,9 @@ import { authRouter } from "./auth/routes.js";
 import { pool } from "./db/pool.js";
 import { ApiError, errorHandler } from "./shared/errors.js";
 
+import { catalogRouter } from "./modules/catalog/routes.js";
+import { ordersRouter } from "./modules/orders/routes.js";
+
 export const app = express();
 
 app.disable("x-powered-by");
@@ -24,5 +27,7 @@ app.get("/api/health", async (_request, response, next) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/products", catalogRouter);
+app.use("/api", ordersRouter);
 app.use((_request, _response, next) => next(new ApiError(404, "NOT_FOUND", "Route not found")));
 app.use(errorHandler);

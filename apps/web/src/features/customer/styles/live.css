@@ -1,0 +1,69 @@
+.live-account {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  font-size: 0.9rem;
+}
+.more {
+  margin-top: 24px;
+}
+.form-panel input:not([type="number"]) {
+  border: 1px solid #aab8ac;
+  border-radius: 4px;
+  padding: 12px;
+  background: #fff;
+  color: var(--green);
+  width: 100%;
+}
+.form-panel .text-button {
+  display: block;
+}
+.collection > h1 {
+  max-width: 800px;
+}
+.catalog-controls > label > select {
+  border: 1px solid #aab8ac;
+  border-radius: 4px;
+  padding: 10px;
+  color: var(--green);
+  background: #fff;
+}
+.shipment-card .manage-line:last-child {
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+.management .form-panel {
+  padding: 22px;
+}
+.more.notice {
+  margin-top: 30px;
+}
+@media (max-width: 600px) {
+  .live-account {
+    gap: 12px;
+    font-size: 0.75rem;
+  }
+  .header {
+    flex-wrap: wrap;
+    height: auto;
+    padding-top: 18px;
+    padding-bottom: 18px;
+  }
+  .header nav {
+    height: 35px;
+  }
+  .header nav button.active:after {
+    bottom: 0;
+  }
+  .live-account {
+    margin-left: auto;
+  }
+  .catalog-controls > label {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+  }
+  .catalog-controls > label > select {
+    max-width: 70%;
+  }
+}
