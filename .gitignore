@@ -1,0 +1,8 @@
+backend/.env
+backend/node_modules/
+backend/dist/
+backend/coverage/
+data-generation/.venv/
+data-generation/__pycache__/
+data-generation/*.egg-info/
+*.py[cod]
