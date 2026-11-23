@@ -147,3 +147,79 @@ transferRouter.post("/:transferId/dispatch", requireAuth, requireRoles("manager"
   });
   res.json({ data: result, request_id: req.requestId });
 });
+
+const approval = z.object({
+  source_warehouse_id: positiveId,
+  destination_warehouse_id: positiveId,
+  items: z.array(z.object({
+    lot_id: positiveId,
+    quantity: z.number().int().positive().max(2147483647),
+  })).nonempty(),
+});
+
+transferRouter.post("/", requireAuth, requireRoles("manager"), async (req, res) => {
+  const parsed = approval.safeParse(req.body);
+  const key = z.string().uuid().safeParse(req.header("Idempotency-Key"));
+  if (!parsed.success || !key.success) {
+    throw new ApiError(400, "VALIDATION_ERROR", "Supply both warehouses, transfer items and a UUID Idempotency-Key");
+  }
+  const { source_warehouse_id: source, destination_warehouse_id: destination, items } = parsed.data;
+  items.sort((a, b) => a.lot_id - b.lot_id);
+  if (source === destination || new Set(items.map(item => item.lot_id)).size !== items.length) {
+    throw new ApiError(400, "VALIDATION_ERROR", "Choose distinct warehouses and include each lot once");
+  }
+  const manager = req.auth!.userId;
+  const payload = JSON.stringify(parsed.data);
+  const result = await inTransaction(async client => {
+    const warehouses = await client.query(
+      "SELECT warehouse_id FROM warehouses WHERE warehouse_id IN ($1,$2) ORDER BY warehouse_id FOR KEY SHARE", [source, destination],
+    );
+    if (warehouses.rowCount !== 2) throw new ApiError(404, "NOT_FOUND", "Warehouse not found");
+    const created = await client.query(
+      `INSERT INTO transfers(source_warehouse_id,destination_warehouse_id,status,requested_by,approved_by,request_id)
+       VALUES ($1,$2,'approved',$3,$3,$4) ON CONFLICT (requested_by,request_id) DO NOTHING RETURNING transfer_id`,
+      [source, destination, manager, key.data],
+    );
+    if (!created.rowCount) {
+      const prior = (await client.query(
+        `SELECT e.details->'result' AS result, e.details->'request'=$3::jsonb AS matches
+           FROM transfers t JOIN transfer_events e USING (transfer_id)
+          WHERE t.requested_by=$1 AND t.request_id=$2 AND e.source_event_key='manager-approval'`,
+        [manager, key.data, payload],
+      )).rows[0];
+      if (!prior?.matches) throw new ApiError(409, "CONFLICT", "This key already identifies another transfer request");
+      return prior.result;
+    }
+    const id = Number(created.rows[0].transfer_id);
+    const approvedItems = [];
+    for (const item of items) {
+      const eligible = await client.query(
+        `SELECT lot_id FROM lots WHERE lot_id=$1 AND status='active'
+           AND (expires_on IS NULL OR expires_on >= CURRENT_DATE) FOR SHARE`, [item.lot_id],
+      );
+      if (!eligible.rowCount) throw new ApiError(409, "CONFLICT", "Lot is unavailable for transfer");
+      const reserved = await client.query(
+        `UPDATE inventory_balances SET reserved=reserved+$3, updated_at=now()
+          WHERE warehouse_id=$1 AND lot_id=$2 AND available >= $3`, [source, item.lot_id, item.quantity],
+      );
+      if (!reserved.rowCount) throw new ApiError(409, "CONFLICT", "Insufficient available stock for this transfer");
+      const line = await client.query(
+        `INSERT INTO transfer_items(transfer_id,source_warehouse_id,destination_warehouse_id,lot_id,quantity)
+         VALUES ($1,$2,$3,$4,$5) RETURNING transfer_item_id`, [id, source, destination, item.lot_id, item.quantity],
+      );
+      approvedItems.push({ ...item, transfer_item_id: Number(line.rows[0].transfer_item_id) });
+      await client.query(
+        `INSERT INTO stock_movements(lot_id,warehouse_id,reserved_delta,event_type,reference_type,reference_id,actor_user_id,idempotency_key)
+         VALUES ($1,$2,$3,'transfer_reserved','transfer',$4,$5,$6)`,
+        [item.lot_id, source, item.quantity, id, manager, JSON.stringify(["approval", id, item.lot_id])],
+      );
+    }
+    const data = { operation_id: id, status: "approved", items: approvedItems };
+    await client.query(
+      `INSERT INTO transfer_events(transfer_id,event_type,actor_user_id,source_event_key,details)
+       VALUES ($1,'approved',$2,'manager-approval',$3)`, [id, manager, JSON.stringify({ request: parsed.data, result: data })],
+    );
+    return data;
+  });
+  res.json({ data: result, request_id: req.requestId });
+});
