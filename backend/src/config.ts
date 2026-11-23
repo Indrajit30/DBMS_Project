@@ -24,8 +24,8 @@ export const config = {
 };
 
 export function getJwtSecret(): string {
-  if (!parsed.data.JWT_SECRET) {
+  if (!config.JWT_SECRET) {
     throw new Error("JWT_SECRET must be set to at least 32 characters to use authentication");
   }
-  return parsed.data.JWT_SECRET;
+  return config.JWT_SECRET;
 }
