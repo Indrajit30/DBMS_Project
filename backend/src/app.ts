@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { authRouter } from "./auth/routes.js";
+import { transferRouter } from "./transfers/routes.js";
 import { pool } from "./db/pool.js";
 import { ApiError, errorHandler } from "./shared/errors.js";
 
@@ -24,5 +25,6 @@ app.get("/api/health", async (_request, response, next) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/transfers", transferRouter);
 app.use((_request, _response, next) => next(new ApiError(404, "NOT_FOUND", "Route not found")));
 app.use(errorHandler);
