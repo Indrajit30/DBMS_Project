@@ -84,3 +84,66 @@ transferRouter.post("/:transferId/receive", requireAuth, requireRoles("manager",
   });
   res.json({ data: result, request_id: req.requestId });
 });
+
+transferRouter.post("/:transferId/dispatch", requireAuth, requireRoles("manager", "warehouse_employee"), async (req, res) => {
+  const parsedId = positiveId.safeParse(Number(req.params.transferId));
+  const key = req.header("Idempotency-Key")?.trim();
+  if (!parsedId.success || !key || key.length > 200 || (req.body !== undefined && !z.object({}).strict().safeParse(req.body).success)) {
+    throw new ApiError(400, "VALIDATION_ERROR", "Dispatch takes a transfer ID, an Idempotency-Key and no items");
+  }
+  const id = parsedId.data;
+  const actor = req.auth!;
+  const eventKey = JSON.stringify(["dispatch", actor.userId, key]);
+  const result = await inTransaction(async client => {
+    const transfer = (await client.query(
+      "SELECT source_warehouse_id, status FROM transfers WHERE transfer_id=$1 FOR UPDATE", [id],
+    )).rows[0];
+    if (!transfer) throw new ApiError(404, "NOT_FOUND", "Transfer not found");
+    const source = transfer.source_warehouse_id;
+    if (actor.role !== "manager" && !actor.warehouseIds.includes(Number(source))) {
+      throw new ApiError(403, "FORBIDDEN", "Source warehouse access required");
+    }
+    const prior = await client.query(
+      "SELECT details FROM transfer_events WHERE transfer_id=$1 AND source_event_key=$2", [id, eventKey],
+    );
+    if (prior.rowCount) return prior.rows[0].details.result;
+    if (!["approved", "picking"].includes(transfer.status)) {
+      throw new ApiError(409, "CONFLICT", "Transfer is not awaiting dispatch");
+    }
+
+    const items = await client.query(
+      `SELECT i.lot_id, i.quantity, i.received_quantity,
+              (SELECT sum(m.reserved_delta) FROM stock_movements m
+                WHERE m.reference_type='transfer' AND m.reference_id=i.transfer_id
+                  AND m.lot_id=i.lot_id AND m.warehouse_id=i.source_warehouse_id) AS held
+         FROM transfer_items i WHERE i.transfer_id=$1 ORDER BY i.lot_id FOR UPDATE OF i`, [id],
+    );
+    if (!items.rowCount) throw new ApiError(409, "CONFLICT", "Transfer has no items");
+    let dispatched = 0;
+    for (const item of items.rows) {
+      if (item.received_quantity !== 0 || Number(item.held) !== item.quantity) {
+        throw new ApiError(409, "CONFLICT", "The approved lot quantity must be reserved for this transfer");
+      }
+      const balance = await client.query(
+        `UPDATE inventory_balances SET on_hand=on_hand-$3, reserved=reserved-$3, updated_at=now()
+          WHERE warehouse_id=$1 AND lot_id=$2 AND reserved >= $3`, [source, item.lot_id, item.quantity],
+      );
+      if (!balance.rowCount) throw new ApiError(409, "CONFLICT", "Source balance has insufficient reserved stock");
+      await client.query(
+        `INSERT INTO stock_movements(lot_id,warehouse_id,on_hand_delta,reserved_delta,event_type,reference_type,
+                                     reference_id,actor_user_id,idempotency_key)
+         VALUES ($1,$2,$3,$3,'transfer_dispatched','transfer',$4,$5,$6)`,
+        [item.lot_id, source, -item.quantity, id, actor.userId, JSON.stringify([id, item.lot_id, eventKey])],
+      );
+      dispatched += item.quantity;
+    }
+    await client.query("UPDATE transfers SET status='in_transit', dispatched_at=now() WHERE transfer_id=$1", [id]);
+    const data = { operation_id: id, status: "in_transit", in_transit_quantity: dispatched };
+    await client.query(
+      `INSERT INTO transfer_events(transfer_id,event_type,actor_user_id,source_event_key,details)
+       VALUES ($1,'dispatched',$2,$3,$4)`, [id, actor.userId, eventKey, JSON.stringify({ result: data })],
+    );
+    return data;
+  });
+  res.json({ data: result, request_id: req.requestId });
+});
